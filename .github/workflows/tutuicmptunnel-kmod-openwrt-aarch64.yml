@@ -1,0 +1,116 @@
+name: Build OpenWrt aarch64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: hrimfaxi/tutuicmptunnel-kmod
+          ref: master
+          submodules: recursive
+
+      - name: Setup deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git wget bison flex ccache pkg-config
+
+      - name: Download OpenWrt SDK
+        run: |
+          set -e
+          cd /tmp
+          VER=24.10.5
+          # IPQ6000 is the SoC in Redmi AX5
+          SDK_URL="https://downloads.openwrt.org/releases/$VER/targets/ipq60xx/generic/openwrt-sdk-$VER-ipq60xx-generic-gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          echo "Downloading OpenWrt SDK for IPQ6000..."
+          wget -q --timeout=300 "$SDK_URL"
+          tar --zstd -xf openwrt-sdk-$VER-ipq60xx-generic-gcc-13.3.0_musl.Linux-x86_64.tar.zst
+          echo "SDK_DIR=/tmp/openwrt-sdk-$VER-ipq60xx-generic-gcc-13.3.0_musl.Linux-x86_64" >> $GITHUB_ENV
+          # Verify
+          ls $SDK_DIR/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-*
+
+      - name: Build
+        run: |
+          set -e
+          SDK=$SDK_DIR
+          export STAGING_DIR=$SDK/staging_dir
+          export TOOLCHAIN=$(find $STAGING_DIR -type d -name 'toolchain-aarch64_cortex-a53_musl')
+          export TARGETROOT=$(find $STAGING_DIR -type d -name 'target-aarch64_cortex-a53_musl')
+          export KERNEL_DIR=$(find $STAGING_DIR/../build_dir -type d -name 'linux-ipq60xx_generic' -path '*linux-*' | head -1)
+          export ARCH=aarch64
+          export CC=$TOOLCHAIN/bin/$ARCH-openwrt-linux-gcc
+          export KERNEL_ARCH=arm64
+          export STAGING_DIR_HOST="$STAGING_DIR/host"
+          export PKG_CONFIG_LIBDIR="$TARGETROOT/usr/lib/pkgconfig"
+          export PKG_CONFIG="$STAGING_DIR_HOST/bin/pkg-config"
+          export PATH="$STAGING_DIR_HOST/bin:$PATH"
+          
+          echo "=== Build Environment ==="
+          echo "TOOLCHAIN:  $TOOLCHAIN"
+          echo "TARGETROOT: $TARGETROOT"
+          echo "KERNEL_DIR: $KERNEL_DIR"
+          echo "CC: $CC"
+          
+          cd tutuicmptunnel-kmod
+          
+          # Compile libsodium
+          cd /tmp
+          git clone https://github.com/jedisct1/libsodium.git
+          cd libsodium
+          git checkout 1.0.20-RELEASE
+          ./autogen.sh
+          ./configure --host=$ARCH-openwrt-linux CC=$TOOLCHAIN/bin/$ARCH-openwrt-linux-gcc
+          make -j$(nproc)
+          echo "libsodium built"
+          
+          # Compile libmnl
+          cd /tmp
+          git clone https://github.com/justmirror/libmnl
+          cd libmnl
+          ./autogen.sh
+          ./configure --host=$ARCH-openwrt-linux --prefix=/usr CC=$TOOLCHAIN/bin/$ARCH-openwrt-linux-gcc
+          make -j$(nproc)
+          make DESTDIR=$TARGETROOT install
+          echo "libmnl built"
+          
+          # Build tutuicmptunnel-kmod
+          cd /tmp/tutuicmptunnel-kmod/tutuicmptunnel-kmod
+          rm -f CMakeCache.txt
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE=$(pwd)/toolchains/openwrt-$ARCH.cmake \
+            -DBISON_EXECUTABLE=/usr/bin/bison \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_HARDEN_MODE=ON \
+            -DSODIUM_INCLUDE_DIR=/tmp/libsodium/src/libsodium/include \
+            -DSODIUM_LIBRARY=/tmp/libsodium/src/libsodium/.libs/libsodium.so \
+            .
+          make -j$(nproc)
+          make install DESTDIR=stripped
+          echo "tutuicmptunnel-kmod built"
+          
+          # Build kernel module
+          cd kmod
+          make \
+            KSRC=$KERNEL_DIR \
+            CROSS_COMPILE=$TOOLCHAIN/bin/$ARCH-openwrt-linux- \
+            ARCH=$KERNEL_ARCH
+          echo "Kernel module built"
+          
+          # Package
+          mkdir -p $GITHUB_WORKSPACE/output
+          cp -r /tmp/tutuicmptunnel-kmod/tutuicmptunnel-kmod/stripped $GITHUB_WORKSPACE/output/
+          cp kmod/tutuicmptunnel.ko $GITHUB_WORKSPACE/output/
+          ls -la $GITHUB_WORKSPACE/output/
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: output/
