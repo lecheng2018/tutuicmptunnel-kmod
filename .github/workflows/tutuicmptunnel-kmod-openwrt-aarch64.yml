@@ -22,13 +22,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git wget bison flex ccache pkg-config autoconf automake libtool zip
 
-      - name: Download ImmortalWRT SDK
+      - name: Download SDK
         run: |
           set -e
           cd /tmp
           URL="https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/targets/qualcommax/ipq60xx/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
           wget -q --timeout=600 "$URL"
           tar --zstd -xf immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
+      - name: Verify SDK
+        run: |
+          SDK=/tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64
+          echo "SDK exists: $(test -d $SDK && echo yes)"
+          echo "Toolchain:"
+          ls $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/ | head -20
+          echo "Target:"
+          ls $SDK/staging_dir/target-aarch64_cortex-a53_musl/usr/lib/pkgconfig/ 2>/dev/null | head -10
 
       - name: Build libsodium
         run: |
@@ -37,13 +46,19 @@ jobs:
           export STAGING_DIR=$SDK/staging_dir
           export TOOLCHAIN=$STAGING_DIR/toolchain-aarch64_cortex-a53_musl
           export ARCH=aarch64
+          export CC=$TOOLCHAIN/bin/$ARCH-openwrt-linux-gcc
+
           cd /tmp
-          git clone --depth 1 https://github.com/jedisct1/libsodium.git
-          cd libsodium
-          git checkout 1.0.20-RELEASE
-          ./autogen.sh
-          ./configure --host=$ARCH-openwrt-linux CC=$TOOLCHAIN/bin/$ARCH-openwrt-linux-gcc
+          git clone --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git libsodium-src
+          cd libsodium-src
+          git submodule update --init
+          ./configure --host=$ARCH-openwrt-linux --prefix=/tmp/libsodium-install CC=$TOOLCHAIN/bin/$ARCH-openwrt-linux-gcc
           make -j$(nproc)
+          make install
+
+          echo "Libsodium built:"
+          ls /tmp/libsodium-install/lib/
+          ls /tmp/libsodium-install/include/sodium/
 
       - name: Build tutuicmptunnel-kmod
         run: |
@@ -54,9 +69,8 @@ jobs:
           export TARGETROOT=$STAGING_DIR/target-aarch64_cortex-a53_musl
           export ARCH=aarch64
           export STAGING_DIR_HOST="$STAGING_DIR/host"
-          export PKG_CONFIG_LIBDIR="$TARGETROOT/usr/lib/pkgconfig"
-          export PKG_CONFIG="$STAGING_DIR_HOST/bin/pkg-config"
           export PATH="$STAGING_DIR_HOST/bin:$PATH"
+          export PKG_CONFIG_LIBDIR="$TARGETROOT/usr/lib/pkgconfig"
 
           rm -f CMakeCache.txt
           cmake \
@@ -64,11 +78,14 @@ jobs:
             -DBISON_EXECUTABLE=/usr/bin/bison \
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_HARDEN_MODE=ON \
-            -DSODIUM_INCLUDE_DIR=/tmp/libsodium/src/libsodium/include \
-            -DSODIUM_LIBRARY=/tmp/libsodium/src/libsodium/.libs/libsodium.so \
+            -DSODIUM_INCLUDE_DIR=/tmp/libsodium-install/include \
+            -DSODIUM_LIBRARY=/tmp/libsodium-install/lib/libsodium.so \
             .
           make -j$(nproc)
           make install DESTDIR=stripped
+
+          echo "=== Installed files ==="
+          find stripped -type f | head -30
 
       - name: Build kernel module
         run: |
@@ -79,17 +96,22 @@ jobs:
           export KERNEL_DIR=$(find $SDK/build_dir -maxdepth 2 -name 'linux-ipq60xx_generic' -path '*linux-*' | head -1)
           export ARCH=aarch64
           export KERNEL_ARCH=arm64
-          echo "Kernel: $KERNEL_DIR"
+
+          echo "Kernel dir: $KERNEL_DIR"
+          ls $KERNEL_DIR/Makefile
+
           cd kmod
           make KSRC=$KERNEL_DIR CROSS_COMPILE=$TOOLCHAIN/bin/$ARCH-openwrt-linux- ARCH=$KERNEL_ARCH
           file tutuicmptunnel.ko
+          ls -la tutuicmptunnel.ko
 
       - name: Package
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
+          find . -name "tuctl_client" -o -name "ktuctl" -o -name "tuserver" | xargs -I {} cp {} $GITHUB_WORKSPACE/output/ 2>/dev/null || true
           cp stripped/usr/local/bin/tuctl_client $GITHUB_WORKSPACE/output/ 2>/dev/null || true
           cp stripped/usr/local/sbin/ktuctl $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          cp /tmp/libsodium/src/libsodium/.libs/libsodium.so $GITHUB_WORKSPACE/output/
+          cp /tmp/libsodium-install/lib/libsodium.so $GITHUB_WORKSPACE/output/
           cp kmod/tutuicmptunnel.ko $GITHUB_WORKSPACE/output/
           ls -la $GITHUB_WORKSPACE/output/
           file $GITHUB_WORKSPACE/output/*
