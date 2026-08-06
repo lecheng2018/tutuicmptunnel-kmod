@@ -3,65 +3,19 @@ name: Build OpenWrt aarch64
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-  actions: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          repository: hrimfaxi/tutuicmptunnel-kmod
-          ref: master
-          submodules: recursive
-
-      - name: Setup deps
-        run: |
+      - run: echo "Hello World"
+      - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake git wget bison flex ccache pkg-config autoconf automake libtool zip libgmp-dev
-
-      - name: Download SDK
-        run: |
-          set -e
+          sudo apt-get install -y build-essential cmake git wget
           cd /tmp
-          URL="https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/targets/qualcommax/ipq60xx/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
-          wget -q --timeout=600 "$URL"
+          wget -q --timeout=600 "https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/targets/qualcommax/ipq60xx/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
           tar --zstd -xf immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-
-      - name: Diagnose SDK structure
-        if: always()
-        run: |
           SDK=/tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64
-          echo "=== SDK root ===" > $GITHUB_WORKSPACE/diag.txt
-          ls -la $SDK/ >> $GITHUB_WORKSPACE/diag.txt 2>&1
-          echo "=== staging_dir ===" >> $GITHUB_WORKSPACE/diag.txt
-          ls -la $SDK/staging_dir/ >> $GITHUB_WORKSPACE/diag.txt 2>&1
-          echo "=== toolchain dirs ===" >> $GITHUB_WORKSPACE/diag.txt
-          find $SDK/staging_dir/toolchain* -maxdepth 1 -type d >> $GITHUB_WORKSPACE/diag.txt 2>&1
-          echo "=== toolchain bin ===" >> $GITHUB_WORKSPACE/diag.txt
-          find $SDK/staging_dir -maxdepth 2 -name "bin" -type d >> $GITHUB_WORKSPACE/diag.txt 2>&1
-          echo "=== aarch64 binaries ===" >> $GITHUB_WORKSPACE/diag.txt
-          find $SDK -maxdepth 5 -name "aarch64-*" -type f 2>/dev/null >> $GITHUB_WORKSPACE/diag.txt | head -10
-          echo "=== target ===" >> $GITHUB_WORKSPACE/diag.txt
-          find $SDK/staging_dir -maxdepth 2 -name "target-*" -type d >> $GITHUB_WORKSPACE/diag.txt 2>&1
-          echo "=== kernel build ===" >> $GITHUB_WORKSPACE/diag.txt
-          find $SDK/build_dir -maxdepth 3 -name "linux*" -type d 2>/dev/null >> $GITHUB_WORKSPACE/diag.txt | head -20
-          echo "=== package feed ===" >> $GITHUB_WORKSPACE/diag.txt
-          ls $SDK/package/ >> $GITHUB_WORKSPACE/diag.txt 2>&1 | head -10
-          echo "=== build_dir ===" >> $GITHUB_WORKSPACE/diag.txt
-          ls $SDK/build_dir/ >> $GITHUB_WORKSPACE/diag.txt 2>&1 | head -20
-          echo "=== gcc test ===" >> $GITHUB_WORKSPACE/diag.txt
-          for f in $(find $SDK/staging_dir -maxdepth 4 -name "aarch64-*gcc" -type f 2>/dev/null | head -3); do
-            echo "GCC: $f" >> $GITHUB_WORKSPACE/diag.txt
-            $f --version >> $GITHUB_WORKSPACE/diag.txt 2>&1
-          done
-
-      - name: Upload diag
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sdk-diag
-          path: diag.txt
+          ls $SDK/
+          find $SDK/staging_dir/toolchain* -name "aarch64-*" -type f 2>/dev/null | head -10
+          find $SDK/build_dir -maxdepth 3 -name "linux*" -type d 2>/dev/null | head -10
+          echo "DIAG_DONE"
