@@ -10,7 +10,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,44 +22,54 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git wget bison flex ccache pkg-config autoconf automake libtool zip libgmp-dev
+          echo "DEPS_OK"
 
-      - name: Download SDK
+      - name: Check SDK download
         run: |
-          set -e
           cd /tmp
           URL="https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/targets/qualcommax/ipq60xx/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
-          wget -q --timeout=600 "$URL"
-          tar --zstd -xf immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          echo "Downloading SDK..."
+          wget "$URL" 2>&1
+          ls -la /tmp/*.zst
+          echo "SDK_DOWNLOADED"
 
-      - name: Run full build
+      - name: Extract SDK
+        run: |
+          cd /tmp
+          tar --zstd -xf immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          ls -la /tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64/
+          echo "SDK_EXTRACTED"
+
+      - name: Verify toolchain
         run: |
           SDK=/tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64
-          WORKDIR=/home/runner/work/tutuicmptunnel-kmod/tutuicmptunnel-kmod
+          echo "Toolchain dir:"
+          ls $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/
+          echo "GCC version:"
+          $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc --version
+          echo "Target:"
+          ls $SDK/staging_dir/target-aarch64_cortex-a53_musl/usr/
+          echo "Kernel:"
+          find $SDK/build_dir -maxdepth 2 -name "linux-ipq60xx_generic" -type d
+          echo "TOOLCHAIN_OK"
 
-          # Toolchain diagnostics
-          echo "=== TOOLCHAIN ===" > $WORKDIR/diag.txt
-          ls $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/ >> $WORKDIR/diag.txt
-          $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc --version >> $WORKDIR/diag.txt 2>&1
-
-          # Kernel
-          KDIR=$(find $SDK/build_dir -maxdepth 2 -name "linux-ipq60xx_generic" -type d | head -1)
-          echo "KDIR=$KDIR" >> $WORKDIR/diag.txt
-          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL)" $KDIR/Makefile >> $WORKDIR/diag.txt 2>/dev/null || echo "no version" >> $WORKDIR/diag.txt
-
-          # Libsodium
-          echo "=== LIBSODIUM ===" >> $WORKDIR/diag.txt
+      - name: Build libsodium
+        run: |
+          SDK=/tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64
           cd /tmp
-          git clone --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git libsodium-src 2>&1 | tail -3 >> $WORKDIR/diag.txt
+          git clone --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git libsodium-src
           cd libsodium-src
-          ./autogen.sh >> $WORKDIR/diag.txt 2>&1 || echo "autogen FAILED" >> $WORKDIR/diag.txt
-          CC=$SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc \
-          ./configure --host=aarch64-openwrt-linux --prefix=/tmp/libsodium-out >> $WORKDIR/diag.txt 2>&1 || echo "configure FAILED" >> $WORKDIR/diag.txt
-          make -j$(nproc) >> $WORKDIR/diag.txt 2>&1 || echo "make FAILED" >> $WORKDIR/diag.txt
-          make install >> $WORKDIR/diag.txt 2>&1 || echo "install FAILED" >> $WORKDIR/diag.txt
+          ./autogen.sh
+          CC=$SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc ./configure --host=aarch64-openwrt-linux --prefix=/tmp/libsodium-out
+          make -j$(nproc)
+          make install
+          ls /tmp/libsodium-out/lib/
+          echo "SODIUM_OK"
 
-          # Tutuicmptunnel
-          echo "=== TUTUICMPTUNNEL ===" >> $WORKDIR/diag.txt
-          cd $WORKDIR
+      - name: Build tutuicmptunnel
+        run: |
+          SDK=/tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64
+          cd /home/runner/work/tutuicmptunnel-kmod/tutuicmptunnel-kmod
           export STAGING_DIR=$SDK/staging_dir
           export TOOLCHAIN=$STAGING_DIR/toolchain-aarch64_cortex-a53_musl
           export TARGETROOT=$STAGING_DIR/target-aarch64_cortex-a53_musl
@@ -72,33 +81,33 @@ jobs:
                 -DENABLE_HARDEN_MODE=ON \
                 -DSODIUM_INCLUDE_DIR=/tmp/libsodium-out/include \
                 -DSODIUM_LIBRARY=/tmp/libsodium-out/lib/libsodium.so \
-                . >> $WORKDIR/diag.txt 2>&1 || echo "cmake FAILED" >> $WORKDIR/diag.txt
-          make -j$(nproc) >> $WORKDIR/diag.txt 2>&1 || echo "tutu make FAILED" >> $WORKDIR/diag.txt
-          make install DESTDIR=stripped >> $WORKDIR/diag.txt 2>&1 || echo "tutu install FAILED" >> $WORKDIR/diag.txt
+                .
+          make -j$(nproc)
+          make install DESTDIR=stripped
+          find stripped -type f
+          echo "TUTU_OK"
 
-          # Kernel module
-          echo "=== KMOD ===" >> $WORKDIR/diag.txt
-          cd $WORKDIR/kmod
-          make KSRC=$KDIR CROSS_COMPILE=$SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux- ARCH=arm64 >> $WORKDIR/diag.txt 2>&1 || echo "kmod make FAILED" >> $WORKDIR/diag.txt
-          file tutuicmptunnel.ko >> $WORKDIR/diag.txt 2>&1 || echo "kmod not found" >> $WORKDIR/diag.txt
-
-          echo "=== DONE ===" >> $WORKDIR/diag.txt
+      - name: Build kmod
+        run: |
+          SDK=/tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64
+          KDIR=$(find $SDK/build_dir -maxdepth 2 -name "linux-ipq60xx_generic" -type d | head -1)
+          cd /home/runner/work/tutuicmptunnel-kmod/tutuicmptunnel-kmod/kmod
+          make KSRC=$KDIR CROSS_COMPILE=$SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux- ARCH=arm64
+          file tutuicmptunnel.ko
+          echo "KMOD_OK"
 
       - name: Package
-        if: always()
         run: |
           WORKDIR=/home/runner/work/tutuicmptunnel-kmod/tutuicmptunnel-kmod
           mkdir -p $GITHUB_WORKSPACE/output
-          cp $WORKDIR/diag.txt $GITHUB_WORKSPACE/output/
-          cp $WORKDIR/stripped/usr/local/bin/tuctl_client $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          cp $WORKDIR/stripped/usr/local/sbin/ktuctl $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          cp $WORKDIR/kmod/tutuicmptunnel.ko $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          cp /tmp/libsodium-out/lib/libsodium.so $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          cp $WORKDIR/stripped/usr/local/bin/tuctl_client $GITHUB_WORKSPACE/output/ 2>/dev/null || echo "no tuctl"
+          cp $WORKDIR/stripped/usr/local/sbin/ktuctl $GITHUB_WORKSPACE/output/ 2>/dev/null || echo "no ktuctl"
+          cp $WORKDIR/kmod/tutuicmptunnel.ko $GITHUB_WORKSPACE/output/ 2>/dev/null || echo "no kmod"
+          cp /tmp/libsodium-out/lib/libsodium.so $GITHUB_WORKSPACE/output/ 2>/dev/null || echo "no sodium"
           ls -la $GITHUB_WORKSPACE/output/
-          file $GITHUB_WORKSPACE/output/* 2>/dev/null || true
+          file $GITHUB_WORKSPACE/output/*
 
       - name: Upload
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-output
