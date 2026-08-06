@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  actions: write
 
 jobs:
   build:
@@ -31,35 +32,35 @@ jobs:
           wget -q --timeout=600 "$URL"
           tar --zstd -xf immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst
 
-      - name: Run build (capture all errors)
+      - name: Run full build
         run: |
-          set -e
           SDK=/tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64
+          WORKDIR=/home/runner/work/tutuicmptunnel-kmod/tutuicmptunnel-kmod
 
-          # 1. Diagnose toolchain
-          echo "=== TOOLCHAIN ===" > diag.txt
-          ls $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/ >> diag.txt
-          $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc --version >> diag.txt 2>&1
+          # Toolchain diagnostics
+          echo "=== TOOLCHAIN ===" > $WORKDIR/diag.txt
+          ls $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/ >> $WORKDIR/diag.txt
+          $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc --version >> $WORKDIR/diag.txt 2>&1
 
-          # 2. Kernel
+          # Kernel
           KDIR=$(find $SDK/build_dir -maxdepth 2 -name "linux-ipq60xx_generic" -type d | head -1)
-          echo "KDIR=$KDIR" >> diag.txt
-          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL)" $KDIR/Makefile >> diag.txt 2>/dev/null
+          echo "KDIR=$KDIR" >> $WORKDIR/diag.txt
+          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL)" $KDIR/Makefile >> $WORKDIR/diag.txt 2>/dev/null || echo "no version" >> $WORKDIR/diag.txt
 
-          # 3. Build libsodium
-          echo "=== LIBSODIUM ===" >> diag.txt
+          # Libsodium
+          echo "=== LIBSODIUM ===" >> $WORKDIR/diag.txt
           cd /tmp
-          git clone --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git libsodium-src
+          git clone --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git libsodium-src 2>&1 | tail -3 >> $WORKDIR/diag.txt
           cd libsodium-src
-          ./autogen.sh >> diag.txt 2>&1
-          export CC=$SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc
-          ./configure --host=aarch64-openwrt-linux --prefix=/tmp/libsodium-out >> diag.txt 2>&1
-          make -j$(nproc) >> diag.txt 2>&1
-          make install >> diag.txt 2>&1
+          ./autogen.sh >> $WORKDIR/diag.txt 2>&1 || echo "autogen FAILED" >> $WORKDIR/diag.txt
+          CC=$SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc \
+          ./configure --host=aarch64-openwrt-linux --prefix=/tmp/libsodium-out >> $WORKDIR/diag.txt 2>&1 || echo "configure FAILED" >> $WORKDIR/diag.txt
+          make -j$(nproc) >> $WORKDIR/diag.txt 2>&1 || echo "make FAILED" >> $WORKDIR/diag.txt
+          make install >> $WORKDIR/diag.txt 2>&1 || echo "install FAILED" >> $WORKDIR/diag.txt
 
-          # 4. Build tutuicmptunnel
-          echo "=== TUTU ===" >> diag.txt
-          cd /home/runner/work/tutuicmptunnel-kmod/tutuicmptunnel-kmod
+          # Tutuicmptunnel
+          echo "=== TUTUICMPTUNNEL ===" >> $WORKDIR/diag.txt
+          cd $WORKDIR
           export STAGING_DIR=$SDK/staging_dir
           export TOOLCHAIN=$STAGING_DIR/toolchain-aarch64_cortex-a53_musl
           export TARGETROOT=$STAGING_DIR/target-aarch64_cortex-a53_musl
@@ -71,30 +72,33 @@ jobs:
                 -DENABLE_HARDEN_MODE=ON \
                 -DSODIUM_INCLUDE_DIR=/tmp/libsodium-out/include \
                 -DSODIUM_LIBRARY=/tmp/libsodium-out/lib/libsodium.so \
-                . >> diag.txt 2>&1
-          make -j$(nproc) >> diag.txt 2>&1
-          make install DESTDIR=stripped >> diag.txt 2>&1
+                . >> $WORKDIR/diag.txt 2>&1 || echo "cmake FAILED" >> $WORKDIR/diag.txt
+          make -j$(nproc) >> $WORKDIR/diag.txt 2>&1 || echo "tutu make FAILED" >> $WORKDIR/diag.txt
+          make install DESTDIR=stripped >> $WORKDIR/diag.txt 2>&1 || echo "tutu install FAILED" >> $WORKDIR/diag.txt
 
-          # 5. Kernel module
-          echo "=== KMOD ===" >> diag.txt
-          cd kmod
-          make KSRC=$KDIR CROSS_COMPILE=$SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux- ARCH=arm64 >> diag.txt 2>&1
-          file tutuicmptunnel.ko >> diag.txt 2>&1
+          # Kernel module
+          echo "=== KMOD ===" >> $WORKDIR/diag.txt
+          cd $WORKDIR/kmod
+          make KSRC=$KDIR CROSS_COMPILE=$SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux- ARCH=arm64 >> $WORKDIR/diag.txt 2>&1 || echo "kmod make FAILED" >> $WORKDIR/diag.txt
+          file tutuicmptunnel.ko >> $WORKDIR/diag.txt 2>&1 || echo "kmod not found" >> $WORKDIR/diag.txt
 
-          echo "=== RESULT ===" >> diag.txt
-          ls -la tutuicmptunnel.ko >> diag.txt 2>&1
-          echo "BUILD_OK" >> diag.txt
+          echo "=== DONE ===" >> $WORKDIR/diag.txt
 
-          # Upload diagnostics
+      - name: Package
+        if: always()
+        run: |
+          WORKDIR=/home/runner/work/tutuicmptunnel-kmod/tutuicmptunnel-kmod
           mkdir -p $GITHUB_WORKSPACE/output
-          cp diag.txt $GITHUB_WORKSPACE/output/
-          cp stripped/usr/local/bin/tuctl_client $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          cp stripped/usr/local/sbin/ktuctl $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          cp kmod/tutuicmptunnel.ko $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          cp $WORKDIR/diag.txt $GITHUB_WORKSPACE/output/
+          cp $WORKDIR/stripped/usr/local/bin/tuctl_client $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          cp $WORKDIR/stripped/usr/local/sbin/ktuctl $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          cp $WORKDIR/kmod/tutuicmptunnel.ko $GITHUB_WORKSPACE/output/ 2>/dev/null || true
           cp /tmp/libsodium-out/lib/libsodium.so $GITHUB_WORKSPACE/output/ 2>/dev/null || true
           ls -la $GITHUB_WORKSPACE/output/
+          file $GITHUB_WORKSPACE/output/* 2>/dev/null || true
 
-      - name: Upload artifact
+      - name: Upload
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-output
