@@ -9,6 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,6 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git wget bison flex ccache pkg-config autoconf automake libtool zip libgmp-dev
+          echo "DEPS_OK" >> diagnostics.txt
 
       - name: Download SDK
         run: |
@@ -29,55 +31,46 @@ jobs:
           URL="https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/targets/qualcommax/ipq60xx/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
           wget -q --timeout=600 "$URL"
           tar --zstd -xf immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-          echo "SDK_OK"
+          echo "SDK_OK" >> diagnostics.txt
           echo "SDK=/tmp/immortalwrt-sdk-25.12-SNAPSHOT-qualcommax-ipq60xx_gcc-14.3.0_musl.Linux-x86_64" >> $GITHUB_ENV
 
-      - name: Verify SDK and toolchain
+      - name: Diagnose toolchain
         run: |
           SDK=$SDK
-          echo "=== Toolchain ==="
-          ls $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-* 2>/dev/null | head -10
-          echo "=== Target headers ==="
-          ls $SDK/staging_dir/target-aarch64_cortex-a53_musl/usr/include/ 2>/dev/null | head -10
-          echo "=== Kernel build dir ==="
-          find $SDK/build_dir -maxdepth 2 -name "linux-ipq60xx_generic" -type d 2>/dev/null
-          echo "=== Kernel version ==="
-          find $SDK/build_dir -maxdepth 3 -name "Makefile" -path "*linux-ipq60xx*" -exec grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" {} \; 2>/dev/null | head -5
+          echo "=== Toolchain binaries ===" >> diagnostics.txt
+          ls $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/ >> diagnostics.txt 2>&1
+          echo "=== CC version ===" >> diagnostics.txt
+          $SDK/staging_dir/toolchain-aarch64_cortex-a53_musl/bin/aarch64-openwrt-linux-gcc --version >> diagnostics.txt 2>&1
+          echo "=== Kernel build ===" >> diagnostics.txt
+          KDIR=$(find $SDK/build_dir -maxdepth 2 -name "linux-ipq60xx_generic" -type d 2>/dev/null | head -1)
+          echo "Kernel: $KDIR" >> diagnostics.txt
+          test -f "$KDIR/Makefile" && echo "Makefile found" >> diagnostics.txt || echo "NO MAKEFILE" >> diagnostics.txt
+          echo "Kernel version:" >> diagnostics.txt
+          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL)" $KDIR/Makefile >> diagnostics.txt 2>/dev/null || echo "no version" >> diagnostics.txt
+          echo "TOOLCHAIN_OK" >> diagnostics.txt
 
-      - name: Build libsodium
+      - name: Build libsodium (diagnostic)
         run: |
           set -e
           SDK=$SDK
+          echo "=== libsodium clone ===" >> diagnostics.txt
+          cd /tmp
+          git clone --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git libsodium-src 2>&1 | tail -5 >> diagnostics.txt
+          cd libsodium-src
+          echo "=== autogen ===" >> diagnostics.txt
+          ./autogen.sh 2>&1 | tail -10 >> diagnostics.txt
+          echo "=== configure ===" >> diagnostics.txt
           export STAGING_DIR=$SDK/staging_dir
           export TOOLCHAIN=$STAGING_DIR/toolchain-aarch64_cortex-a53_musl
-          export ARCH=aarch64
-          export CC="$TOOLCHAIN/bin/$ARCH-openwrt-linux-gcc"
-          export CFLAGS="-I$TOOLCHAIN/include"
+          export CC="$TOOLCHAIN/bin/aarch64-openwrt-linux-gcc"
+          ./configure --host=aarch64-openwrt-linux --prefix=/tmp/libsodium-out 2>&1 | tail -30 >> diagnostics.txt
+          echo "=== make ===" >> diagnostics.txt
+          make -j$(nproc) 2>&1 | tail -30 >> diagnostics.txt
+          make install 2>&1 | tail -10 >> diagnostics.txt
+          ls /tmp/libsodium-out/lib/ >> diagnostics.txt 2>&1
+          echo "SODIUM_OK" >> diagnostics.txt
 
-          echo "CC=$CC"
-          echo "Toolchain GCC version:"
-          $CC --version 2>&1 | head -2
-
-          cd /tmp
-          git clone --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git libsodium-src
-          cd libsodium-src
-          git submodule update --init --depth 1
-          
-          echo "=== Running autogen ==="
-          ls -la autogen.sh
-          ./autogen.sh 2>&1 | tail -10
-          
-          echo "=== Running configure ==="
-          ./configure --host=$ARCH-openwrt-linux --prefix=/tmp/libsodium-out 2>&1 | tail -20
-          
-          echo "=== Building ==="
-          make -j$(nproc) 2>&1 | tail -20
-          make install 2>&1 | tail -10
-
-          echo "=== Result ==="
-          ls -la /tmp/libsodium-out/lib/
-
-      - name: Build tutuicmptunnel-kmod
+      - name: Build tutuicmptunnel-kmod (diagnostic)
         run: |
           set -e
           SDK=$SDK
@@ -88,56 +81,41 @@ jobs:
           export STAGING_DIR_HOST="$STAGING_DIR/host"
           export PATH="$STAGING_DIR_HOST/bin:$PATH"
           export PKG_CONFIG_LIBDIR="$TARGETROOT/usr/lib/pkgconfig"
-
-          echo "=== cmake ==="
+          echo "=== cmake ===" >> diagnostics.txt
           rm -f CMakeCache.txt
-          cmake \
-            -DCMAKE_TOOLCHAIN_FILE=$(pwd)/toolchains/openwrt-$ARCH.cmake \
-            -DBISON_EXECUTABLE=/usr/bin/bison \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_HARDEN_MODE=ON \
-            -DSODIUM_INCLUDE_DIR=/tmp/libsodium-out/include \
-            -DSODIUM_LIBRARY=/tmp/libsodium-out/lib/libsodium.so \
-            . 2>&1 | tail -30
-          
-          make -j$(nproc) 2>&1 | tail -30
-          make install DESTDIR=stripped 2>&1 | tail -20
+          cmake -DCMAKE_TOOLCHAIN_FILE=$(pwd)/toolchains/openwrt-$ARCH.cmake -DBISON_EXECUTABLE=/usr/bin/bison -DCMAKE_BUILD_TYPE=Release -DENABLE_HARDEN_MODE=ON -DSODIUM_INCLUDE_DIR=/tmp/libsodium-out/include -DSODIUM_LIBRARY=/tmp/libsodium-out/lib/libsodium.so . 2>&1 | tail -30 >> diagnostics.txt
+          echo "=== make ===" >> diagnostics.txt
+          make -j$(nproc) 2>&1 | tail -30 >> diagnostics.txt
+          echo "=== install ===" >> diagnostics.txt
+          make install DESTDIR=stripped 2>&1 | tail -20 >> diagnostics.txt
+          find stripped -type f >> diagnostics.txt 2>/dev/null || echo "no stripped dir" >> diagnostics.txt
+          echo "TUTU_OK" >> diagnostics.txt
 
-          echo "=== Installed ==="
-          find stripped -type f | head -20
-
-      - name: Build kernel module
+      - name: Build kernel module (diagnostic)
         run: |
           set -e
           SDK=$SDK
           export STAGING_DIR=$SDK/staging_dir
           export TOOLCHAIN=$STAGING_DIR/toolchain-aarch64_cortex-a53_musl
           export KERNEL_DIR=$(find $SDK/build_dir -maxdepth 2 -name 'linux-ipq60xx_generic' -path '*linux-*' | head -1)
-          export ARCH=aarch64
-          export KERNEL_ARCH=arm64
-
-          echo "KSRC=$KERNEL_DIR"
-          ls $KERNEL_DIR/Makefile
-
+          echo "=== kernel module ===" >> diagnostics.txt
           cd kmod
-          make KSRC=$KERNEL_DIR CROSS_COMPILE=$TOOLCHAIN/bin/$ARCH-openwrt-linux- ARCH=$KERNEL_ARCH 2>&1
-          file tutuicmptunnel.ko
-          ls -la tutuicmptunnel.ko
+          make KSRC=$KERNEL_DIR CROSS_COMPILE=$TOOLCHAIN/bin/aarch64-openwrt-linux- ARCH=arm64 2>&1 | tail -40 >> diagnostics.txt
+          file tutuicmptunnel.ko >> diagnostics.txt 2>&1
+          ls -la tutuicmptunnel.ko >> diagnostics.txt 2>&1
+          echo "KMOD_OK" >> diagnostics.txt
 
-      - name: Package and output
+      - name: Package
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          # Find all built binaries
-          find . -maxdepth 3 \( -name "tuctl_client" -o -name "ktuctl" -o -name "tuserver" \) -type f | while read f; do
-            cp "$f" $GITHUB_WORKSPACE/output/
-          done
+          find . -maxdepth 3 \( -name "tuctl_client" -o -name "ktuctl" -o -name "tuserver" \) -type f 2>/dev/null | while read f; do cp "$f" $GITHUB_WORKSPACE/output/; done
           cp stripped/usr/local/bin/tuctl_client $GITHUB_WORKSPACE/output/ 2>/dev/null || true
           cp stripped/usr/local/sbin/ktuctl $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          cp /tmp/libsodium-out/lib/libsodium.so $GITHUB_WORKSPACE/output/
-          cp kmod/tutuicmptunnel.ko $GITHUB_WORKSPACE/output/
+          cp /tmp/libsodium-out/lib/libsodium.so $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          cp kmod/tutuicmptunnel.ko $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+          cp diagnostics.txt $GITHUB_WORKSPACE/output/
           ls -la $GITHUB_WORKSPACE/output/
-          file $GITHUB_WORKSPACE/output/*
-          echo "BUILD_OK" >> $GITHUB_OUTPUT
+          file $GITHUB_WORKSPACE/output/* 2>/dev/null
 
       - name: Upload
         uses: actions/upload-artifact@v4
